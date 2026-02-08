@@ -44,7 +44,7 @@ export const addTask = (title: string): Promise<Task | null> => {
     // BUG: The original bug was that empty strings were allowed if they weren't strictly empty.
     // But here we're implementing based on the previous implementation logic.
     // The previous implementation checked `if (!title) return null;`
-    if (!title) {
+    if (!title.trim()) {
       return resolve(null);
     }
 
