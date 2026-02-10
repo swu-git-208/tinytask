@@ -1,0 +1,126 @@
+name: Node.js CI
+
+# This workflow runs only on pushes to the main branch.
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout the repository code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Set up Node.js v20 with npm caching
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm' # Enable caching for npm dependencies
+
+      # 3. Install dependencies using npm ci
+      - name: Install dependencies
+        run: npm ci
+      # 4. Run the linter
+      - name: Lint code
+        run: npm run lint
+
+      # 5. Run the tests
+      - name: Run tests
+        run: npm test
+
+      # 6. Build the application
+      - name: Build application
+        run: npm run build
+
+      # 7. Upload the 'dist' directory as a build artifact
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  docker-smoke-test:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      # 8. Build the Docker image
+      - name: Build Docker image
+        run: docker build -t tinyweb:${{ github.sha }} .
+
+      # 9. Run the Docker container in detached mode
+      - name: Run Docker container
+        run: docker run -d -p 3000:3000 --name tinyweb-app tinyweb:${{ github.sha }}
+
+      # 10. Smoke test the application with a retry loop
+      - name: Smoke test with curl
+        run: |
+          echo "Waiting for container to start..."
+          for i in {1..10}; do
+            if curl -sf http://localhost:3000/health; then
+              echo "Health check passed!"
+              exit 0
+            fi
+            echo "Attempt $i failed. Retrying in 5 seconds..."
+            sleep 5
+          done
+          echo "Health check failed after 10 attempts."
+          exit 1
+      # 11. Stop and remove the Docker container
+      - name: Stop and remove container
+        if: always()
+        run: |
+          docker logs tinyweb-app
+          docker stop tinyweb-app
+          docker rm tinyweb-app
+
+  push-to-dockerhub:
+    needs: docker-smoke-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 12. Set up Docker Buildx for efficient builds
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 13. Log in to Docker Hub
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # 14. Build and push image to Docker Hub
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-to-dokploy:
+    needs: push-to-dockerhub
+    runs-on: ubuntu-latest
+
+    steps:
+      # 15. Trigger Dokploy to pull the new image
+      - name: Trigger Dokploy Deploy
+        run: |
+          curl -X POST "${{ secrets.DOKPLOY_URL }}/api/application.deploy" \
+            -H "x-api-key: ${{ secrets.DOKPLOY_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"applicationId": "${{ secrets.DOKPLOY_APP_ID }}"}'
+
